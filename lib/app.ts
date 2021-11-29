@@ -85,11 +85,11 @@ export const probotApp = (app: Probot) => {
               console.log("CREATED COMMENT");
             }
           } catch (e) {
-            console.log(e);
+            throw e;
           }
         }
       } catch (e) {
-        console.log(e);
+        throw e;
       }
     }
   });
