@@ -7,6 +7,6 @@ const probot = createProbot();
 export default (req, res) => {
   return createNodeMiddleware(probotApp, {
     probot,
-    webhooksPath: "/api/webhook",
+    webhooksPath: "https://stately-github-app.vercel.app/api/webhook",
   })(req, res);
 };
