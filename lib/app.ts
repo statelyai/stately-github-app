@@ -3,7 +3,7 @@ import lzString from "lz-string";
 import { createMachine } from "xstate";
 import { parseMachinesFromFile } from "xstate-parser-demo";
 
-export = (app: Probot) => {
+export const probotApp = (app: Probot) => {
   app.on("pull_request.synchronize", async (context) => {
     const headSha = context.payload.pull_request.head.sha;
     const baseSha = context.payload.pull_request.base.sha;

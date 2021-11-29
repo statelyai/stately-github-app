@@ -14,8 +14,7 @@
     // "composite": true,                     /* Enable project compilation */
     // "tsBuildInfoFile": "./" /* Specify file to store incremental compilation information */,
     // "removeComments": true,                /* Do not emit comments to output. */
-    "noEmit": true, /* Do not emit outputs. */
-    // "importHelpers": true,                 /* Import emit helpers from 'tslib'. */
+    "noEmit": true, /* Do not emit outputs. */// "importHelpers": true,                 /* Import emit helpers from 'tslib'. */
     // "downlevelIteration": true,            /* Provide full support for iterables in 'for-of', spread, and destructuring when targeting 'ES5' or 'ES3'. */
     // "isolatedModules": true,               /* Transpile each file as a separate module (similar to 'ts.transpileModule'). */
     /* Strict Type-Checking Options */
@@ -55,13 +54,23 @@
     "forceConsistentCasingInFileNames": true /* Disallow inconsistently-cased references to the same file. */,
     "resolveJsonModule": true,
     "pretty": false,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "target": "es5",
+    "lib": [
+      "dom",
+      "dom.iterable",
+      "esnext"
+    ],
+    "module": "esnext",
+    "isolatedModules": true,
+    "jsx": "preserve"
   },
   "exclude": [
     "dist"
   ],
   "include": [
-    "lib"
+    "lib",
+    "pages/handler.ts"
   ],
   "compileOnSave": false
 }

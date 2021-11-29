@@ -1,10 +1,10 @@
 import { createNodeMiddleware, createProbot } from "probot";
 
-import app from "./app";
+import { probotApp } from "../../../../lib/app";
 
 const probot = createProbot();
 
-export default createNodeMiddleware(app, {
+export default createNodeMiddleware(probotApp, {
   probot,
   webhooksPath: "/api/github/webhooks",
 });

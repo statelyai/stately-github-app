@@ -5,6 +5,6 @@ npm-debug.log
 .env
 coverage
 dist
-api
+.next
 
 .vercel
