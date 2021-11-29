@@ -56,6 +56,8 @@ export const probotApp = (app: Probot) => {
 
         const result = parseMachinesFromFile(fileContents);
 
+        const lineComments = new Set<number>();
+
         for (const machineResult of result.machines) {
           try {
             const config = machineResult.toConfig();
@@ -63,7 +65,12 @@ export const probotApp = (app: Probot) => {
             const startLine =
               machineResult.ast.definition?.node.loc?.start.line;
 
-            if (config && typeof startLine === "number") {
+            if (
+              config &&
+              typeof startLine === "number" &&
+              // If we haven't already commented on this line
+              !lineComments.has(startLine)
+            ) {
               // Tests that it's valid
               createMachine(config);
 
@@ -82,14 +89,15 @@ export const probotApp = (app: Probot) => {
                   commit_id: headSha,
                 }),
               );
+              lineComments.add(startLine);
               console.log("CREATED COMMENT");
             }
           } catch (e) {
-            throw e;
+            console.log(e);
           }
         }
       } catch (e) {
-        throw e;
+        console.log(e);
       }
     }
   });
