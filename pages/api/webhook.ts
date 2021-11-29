@@ -1,12 +1,17 @@
+import { NextApiHandler } from "next";
 import { createNodeMiddleware, createProbot } from "probot";
 
 import { probotApp } from "../../lib/app";
 
 const probot = createProbot();
 
-export default (req, res) => {
+const handler: NextApiHandler = (req, res) => {
+  console.log(req.url);
   return createNodeMiddleware(probotApp, {
     probot,
-    webhooksPath: "https://stately-github-app.vercel.app/api/webhook",
+    // Force it to prevent a 404
+    webhooksPath: new URL(req.url).pathname,
   })(req, res);
 };
+
+export default handler;
