@@ -6,11 +6,11 @@ import { probotApp } from "../../lib/app";
 const probot = createProbot();
 
 const handler: NextApiHandler = (req, res) => {
-  console.log(req.url);
+  req.url = "http://localhost:3000/api/webhook";
   return createNodeMiddleware(probotApp, {
     probot,
     // Force it to prevent a 404
-    webhooksPath: new URL(req.url).pathname,
+    webhooksPath: "/api/webhook",
   })(req, res);
 };
 
