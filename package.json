@@ -12,8 +12,8 @@
     "probot-app"
   ],
   "scripts": {
-    "build": "esbuild src/app.ts --bundle --platform=node --outfile=lib/app.js && esbuild src/handler.ts --bundle --platform=node --outfile=api/github/webhooks.js",
-    "start": "probot run ./lib/app.js",
+    "build": "esbuild lib/app.ts --bundle --platform=node --outfile=dist/app.js && esbuild lib/handler.ts --bundle --platform=node --outfile=api/github/webhooks.js",
+    "start": "probot run ./dist/app.js",
     "test": "jest"
   },
   "dependencies": {

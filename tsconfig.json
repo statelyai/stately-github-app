@@ -57,8 +57,11 @@
     "pretty": false,
     "skipLibCheck": true
   },
+  "exclude": [
+    "dist"
+  ],
   "include": [
-    "src"
+    "lib"
   ],
   "compileOnSave": false
 }
