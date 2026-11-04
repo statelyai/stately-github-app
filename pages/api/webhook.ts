@@ -3,13 +3,11 @@ import { createNodeMiddleware, createProbot } from "probot";
 
 import { probotApp } from "../../lib/app";
 
+export const config = { api: { bodyParser: false } };
+
 const probot = createProbot();
 
-const handler: NextApiHandler = (req, res) => {
-  return createNodeMiddleware(probotApp, {
-    probot,
-    webhooksPath: "/api/webhook",
-  })(req, res);
-};
+const middleware = createNodeMiddleware(probotApp, { probot, webhooksPath: "/api/webhook" });
+const handler: NextApiHandler = (req, res) => middleware(req, res);
 
 export default handler;

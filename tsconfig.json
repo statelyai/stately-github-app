@@ -70,7 +70,7 @@
   ],
   "include": [
     "lib",
-    "pages/handler.ts"
+    "pages/**/*.ts"
   ],
   "compileOnSave": false
 }

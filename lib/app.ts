@@ -1,9 +1,13 @@
 import { Probot } from "probot";
+import { forwardDocumentationEvent } from "./documentation";
 import lzString from "lz-string";
 import { createMachine } from "xstate";
 import { parseMachinesFromFile } from "xstate-parser-demo";
 
 export const probotApp = (app: Probot) => {
+  app.on(["push", "installation.deleted", "installation.suspend", "installation_repositories.removed"], async context => {
+    await forwardDocumentationEvent(context.name, context.id, context.payload);
+  });
   app.on("pull_request.synchronize", async (context) => {
     const headSha = context.payload.pull_request.head.sha;
     const baseSha = context.payload.pull_request.base.sha;
@@ -107,3 +111,5 @@ export const probotApp = (app: Probot) => {
   // To get your app running against GitHub, see:
   // https://probot.github.io/docs/development/
 };
+
+export default probotApp;

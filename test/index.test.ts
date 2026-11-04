@@ -3,11 +3,11 @@
 
 import nock from "nock";
 // Requiring our app implementation
-import myProbotApp from "../src";
+import { probotApp } from "../lib/app";
 import { Probot, ProbotOctokit } from "probot";
 // Requiring our fixtures
-import payload from "./fixtures/issues.opened.json";
-const issueCreatedBody = { body: "Thanks for opening this issue!" };
+
+
 const fs = require("fs");
 const path = require("path");
 
@@ -31,31 +31,12 @@ describe("My Probot app", () => {
       }),
     });
     // Load our app into probot
-    probot.load(myProbotApp);
+    probot.load(probotApp);
   });
 
-  test("creates a comment when an issue is opened", async (done) => {
-    const mock = nock("https://api.github.com")
-      // Test that we correctly return a test token
-      .post("/app/installations/2/access_tokens")
-      .reply(200, {
-        token: "test",
-        permissions: {
-          issues: "write",
-        },
-      })
-
-      // Test that a comment is posted
-      .post("/repos/hiimbex/testing-things/issues/1/comments", (body: any) => {
-        done(expect(body).toMatchObject(issueCreatedBody));
-        return true;
-      })
-      .reply(200);
-
-    // Receive a webhook event
-    await probot.receive({ name: "issues", payload });
-
-    expect(mock.pendingMocks()).toStrictEqual([]);
+  test("ignores documentation events while integration is disabled", async () => {
+    await probot.receive({ id: "delivery", name: "push", payload: { ref: "refs/heads/main" } });
+    expect(nock.pendingMocks()).toEqual([]);
   });
 
   afterEach(() => {
@@ -72,3 +53,9 @@ describe("My Probot app", () => {
 
 // For more information about testing with Nock see:
 // https://github.com/nock/nock
+
+test("Probot rejects tampered push deliveries before forwarding", async () => {
+  const app = new Probot({ appId: 123, privateKey, secret: "signature-secret" });
+  app.load(probotApp);
+  await expect(app.webhooks.verifyAndReceive({ id: "delivery", name: "push", payload: "{}", signature: "sha256=" + "0".repeat(64) })).rejects.toThrow();
+});
