@@ -1,0 +1,5 @@
+packages: []
+
+# No dependency lifecycle scripts, except the pinned esbuild binary installer.
+allowBuilds:
+  esbuild: true

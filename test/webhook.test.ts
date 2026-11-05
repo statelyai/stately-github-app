@@ -1,87 +1,267 @@
-import { createHmac } from "crypto";
-import { readFileSync } from "fs";
-import { createServer, request } from "http";
-import { join } from "path";
-import nock from "nock";
-import { Probot } from "probot";
-import { createWebhookHandler, MAX_WEBHOOK_BYTES } from "../lib/webhook";
+import assert from "node:assert/strict";
+import { request } from "node:http";
+import { mock, test } from "node:test";
+import {
+  createWebhookHandler,
+  MAX_WEBHOOK_BYTES,
+  MAX_CONCURRENT_REQUESTS,
+} from "../lib/webhook.js";
+import { secret, serve, send, signedHeaders, push } from "./helpers.js";
 
-const secret = "synthetic-webhook-secret";
-const privateKey = readFileSync(join(__dirname, "fixtures/mock-cert.pem"), "utf8");
-const originalEnv = { ...process.env };
-const push = { ref: "refs/heads/main", after: "a".repeat(40), deleted: false, repository: { id: 456, full_name: "owner/app", default_branch: "main" }, installation: { id: 123 } };
-
-async function deliver(body: string | Buffer, headers: Record<string, string> = {}, path = "/api/webhook") {
-  const probot = new Probot({ appId: 123, privateKey, secret, webhookPath: "/api/webhook", logLevel: "fatal" });
-  const server = createServer(createWebhookHandler(probot));
-  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+test("authenticates exact bytes, including whitespace, Unicode and a >1 MB delivery", async () => {
+  const received: unknown[] = [];
+  const host = await serve(
+    createWebhookHandler({
+      secret,
+      handleEvent: async (...event) => {
+        received.push(event);
+      },
+    }),
+  );
   try {
-    const address = server.address();
-    if (!address || typeof address === "string") throw new Error("No test server address");
-    return await new Promise<{ status: number; body: string }>((resolve, reject) => {
-      const outgoing = request({ hostname: "127.0.0.1", port: address.port, path, method: "POST", agent: false, headers: {
-        "content-type": "application/json", "x-github-event": "push", "x-github-delivery": "test-delivery",
-        "x-hub-signature": `sha1=${createHmac("sha1", secret).update(body).digest("hex")}`,
-        "x-hub-signature-256": `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`, ...headers,
-      } }, response => {
-        let result = "";
-        response.on("data", chunk => { result += chunk; });
-        response.on("end", () => resolve({ status: response.statusCode ?? 0, body: result }));
-        response.on("error", reject);
+    const body = JSON.stringify(
+      { ...push, commits: [{ message: "é".repeat(600_000) }] },
+      null,
+      2,
+    );
+    assert.equal((await send(host.url, body)).status, 200);
+    assert.equal(received.length, 1);
+    assert.equal(
+      (
+        await send(
+          host.url,
+          body,
+          signedHeaders(JSON.stringify(JSON.parse(body))),
+        )
+      ).status,
+      401,
+    );
+    assert.equal(received.length, 1);
+  } finally {
+    await host.close();
+  }
+});
+
+test("rejects tampering, SHA1-only auth, invalid UTF-8, non-object JSON and encoded bodies", async () => {
+  let count = 0;
+  const host = await serve(
+    createWebhookHandler({
+      secret,
+      handleEvent: async () => {
+        count++;
+      },
+    }),
+  );
+  try {
+    const body = "{}";
+    assert.equal(
+      (await send(host.url, '{"tampered":true}', signedHeaders(body))).status,
+      401,
+    );
+    assert.equal(
+      (
+        await send(host.url, body, {
+          ...signedHeaders(body),
+          "x-hub-signature-256": "",
+        })
+      ).status,
+      400,
+    );
+    const invalid = Buffer.from([0xff, 0xfe]);
+    assert.equal((await send(host.url, invalid)).status, 400);
+    assert.equal((await send(host.url, "[]")).status, 400);
+    assert.equal((await send(host.url, "null")).status, 400);
+    assert.equal(
+      (
+        await send(host.url, body, {
+          ...signedHeaders(body),
+          "content-type": "text/plain",
+        })
+      ).status,
+      415,
+    );
+    assert.equal(
+      (
+        await send(host.url, body, {
+          ...signedHeaders(body),
+          "content-encoding": "gzip",
+        })
+      ).status,
+      415,
+    );
+    assert.equal(count, 0);
+  } finally {
+    await host.close();
+  }
+});
+
+test("enforces the only route, method, valid headers and no-store responses", async () => {
+  const host = await serve(
+    createWebhookHandler({ secret, handleEvent: async () => {} }),
+  );
+  try {
+    assert.equal(
+      (await send(host.url.replace("/api/webhook", "/other"), "{}")).status,
+      404,
+    );
+    const get = await send(host.url, "", signedHeaders(""), "GET");
+    assert.equal(get.status, 405);
+    assert.equal(get.headers.allow, "POST");
+    assert.equal(get.headers["cache-control"], "no-store");
+    assert.equal(
+      (
+        await send(host.url, "{}", {
+          ...signedHeaders("{}"),
+          "x-github-delivery": "not-a-guid",
+        })
+      ).status,
+      400,
+    );
+  } finally {
+    await host.close();
+  }
+});
+
+test("bounds bytes actually read on chunked requests before authentication", async () => {
+  let count = 0;
+  const host = await serve(
+    createWebhookHandler({
+      secret,
+      handleEvent: async () => {
+        count++;
+      },
+    }),
+  );
+  try {
+    const body = Buffer.alloc(MAX_WEBHOOK_BYTES + 1024, 32);
+    const headers = { ...signedHeaders("{}"), "transfer-encoding": "chunked" };
+    assert.equal((await send(host.url, body, headers)).status, 413);
+    assert.equal(count, 0);
+  } finally {
+    await host.close();
+  }
+});
+
+test("expires slow bodies and caps concurrent readers", async () => {
+  const host = await serve(
+    createWebhookHandler({
+      secret,
+      handleEvent: async () => {},
+      bodyTimeoutMs: 150,
+    }),
+  );
+  const clients: ReturnType<typeof request>[] = [];
+  try {
+    const results = Array.from(
+      { length: MAX_CONCURRENT_REQUESTS },
+      () =>
+        new Promise<number>((resolve, reject) => {
+          const client = request(
+            host.url,
+            {
+              method: "POST",
+              headers: {
+                ...signedHeaders("{}"),
+                "transfer-encoding": "chunked",
+              },
+              agent: false,
+            },
+            (response) => {
+              response.resume();
+              response.once("end", () => resolve(response.statusCode ?? 0));
+            },
+          );
+          client.on("error", reject);
+          client.flushHeaders();
+          clients.push(client);
+        }),
+    );
+    // A valid body read behind those sockets observes the capacity bound.
+    const result = await send(host.url, "{}");
+    assert.equal(result.status, 503);
+    assert.equal(result.headers["retry-after"], "1");
+    assert.deepEqual(await Promise.all(results), [408, 408, 408, 408]);
+  } finally {
+    for (const client of clients) client.destroy();
+    await host.close();
+  }
+});
+
+test("deduplicates concurrent and changed-delivery-ID replays within the instance", async () => {
+  let count = 0;
+  const host = await serve(
+    createWebhookHandler({
+      secret,
+      handleEvent: async () => {
+        count++;
+        await new Promise((resolve) => setImmediate(resolve));
+      },
+    }),
+  );
+  try {
+    assert.deepEqual(
+      (await Promise.all([send(host.url, "{}"), send(host.url, "{}")])).map(
+        (result) => result.status,
+      ),
+      [200, 200],
+    );
+    assert.equal((await send(host.url, "{}")).status, 200);
+    assert.equal(count, 1);
+  } finally {
+    await host.close();
+  }
+});
+
+test("failed work is retryable and diagnostics cannot expose SDK errors or credentials", async () => {
+  let count = 0;
+  const log = mock.method(console, "error", () => {});
+  const host = await serve(
+    createWebhookHandler({
+      secret,
+      handleEvent: async () => {
+        if (++count === 1) throw new Error(`authorization: ${secret}`);
+      },
+    }),
+  );
+  try {
+    const result = await send(host.url, "{}");
+    assert.equal(result.status, 500);
+    assert.equal(result.body, "Webhook failed");
+    assert.equal(JSON.stringify(log.mock.calls).includes(secret), false);
+    assert.equal((await send(host.url, "{}")).status, 200);
+    assert.equal(count, 2);
+  } finally {
+    await host.close();
+    log.mock.restore();
+  }
+});
+
+test("aborted sockets release capacity and leave the server usable", async () => {
+  const host = await serve(
+    createWebhookHandler({ secret, handleEvent: async () => {} }),
+  );
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const client = request(host.url, {
+        method: "POST",
+        headers: { ...signedHeaders("{}"), "transfer-encoding": "chunked" },
+        agent: false,
       });
-      outgoing.on("error", reject);
-      outgoing.end(body);
+      client.on("error", (error) => {
+        if ("code" in error && error.code === "ECONNRESET") resolve();
+        else reject(error);
+      });
+      client.once("socket", (socket) =>
+        socket.once("connect", () => {
+          client.flushHeaders();
+          client.write("{");
+          setImmediate(() => client.destroy());
+        }),
+      );
+      client.once("close", resolve);
     });
-  } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
-}
-
-beforeEach(() => {
-  process.env.STATELY_DOCUMENTATION_WEBHOOK_URL = "https://stately.test/documentation";
-  process.env.WEBHOOK_SECRET = secret;
-  nock.disableNetConnect(); nock.enableNetConnect("127.0.0.1");
-});
-afterEach(() => { process.env = { ...originalEnv }; nock.cleanAll(); nock.enableNetConnect(); });
-
-test("the real HTTP route verifies exact JSON and forwards only the compact default-branch facts", async () => {
-  const body = JSON.stringify({ ...push, commits: [{ message: "x".repeat(1_100_000) }] }, null, 2);
-  const forwarded = JSON.stringify(push);
-  const scope = nock("https://stately.test", { reqheaders: { "x-hub-signature-256": `sha256=${createHmac("sha256", secret).update(forwarded).digest("hex")}` } }).post("/documentation", push).reply(202);
-  expect((await deliver(body)).status).toBe(200);
-  expect(scope.isDone()).toBe(true);
-});
-test("feature branches and deletions never reach the documentation service", async () => {
-  expect((await deliver(JSON.stringify({ ...push, ref: "refs/heads/topic" }))).status).toBe(200);
-  expect((await deliver(JSON.stringify({ ...push, deleted: true }))).status).toBe(200);
-});
-test("bad signatures and invalid UTF-8 cannot reach the forwarder", async () => {
-  expect((await deliver(JSON.stringify(push), { "x-hub-signature-256": "sha256=" + "0".repeat(64) })).status).toBe(401);
-  expect((await deliver(Buffer.from([0xff]))).status).toBe(400);
-});
-test("bounds actual chunked request bytes before Probot or forwarding", async () => {
-  const body = Buffer.alloc(MAX_WEBHOOK_BYTES + 1, " ");
-  expect((await deliver(body, { "transfer-encoding": "chunked" })).status).toBe(413);
-});
-test("installation revocation forwards only the necessary facts", async () => {
-  const event = { action: "deleted", installation: { id: 123 }, account: { privateMetadata: "omitted" } };
-  const scope = nock("https://stately.test").post("/documentation", { action: "deleted", installation: { id: 123 } }).reply(202);
-  expect((await deliver(JSON.stringify(event), { "x-github-event": "installation" })).status).toBe(200);
-  expect(scope.isDone()).toBe(true);
-});
-
-
-test("PR synchronization still reaches the existing visualization handler", async () => {
-  const base = "b".repeat(40), head = "a".repeat(40);
-  const event = { action: "synchronize", number: 5, installation: { id: 123 },
-    repository: { id: 456, name: "app", full_name: "owner/app", owner: { login: "owner" } },
-    pull_request: { number: 5, base: { sha: base }, head: { sha: head } },
-  };
-  const github = nock("https://api.github.com")
-    .post("/app/installations/123/access_tokens").reply(200, { token: "synthetic-installation-token", expires_at: "2099-01-01T00:00:00Z" })
-    .get("/repos/owner/app/pulls/5/comments").reply(200, [])
-    .get(`/repos/owner/app/compare/${base}...${head}`).reply(200, { files: [] });
-  expect((await deliver(JSON.stringify(event, null, 2), { "x-github-event": "pull_request" })).status).toBe(200);
-  expect(github.isDone()).toBe(true);
-});
-test("only the configured webhook path can dispatch events", async () => {
-  expect((await deliver(JSON.stringify(push), {}, "/wrong-path")).status).toBe(404);
+    assert.equal((await send(host.url, "{}")).status, 200);
+  } finally {
+    await host.close();
+  }
 });
