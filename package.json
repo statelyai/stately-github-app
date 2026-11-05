@@ -30,7 +30,7 @@
     "@types/node": "^24.19.2",
     "esbuild": "^0.28.2",
     "nock": "^15.0.5",
-    "typescript": "~6.0.3"
+    "typescript": "~7.0.2"
   },
   "engines": {
     "node": "24.x"
