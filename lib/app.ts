@@ -5,8 +5,26 @@ import { createMachine } from "xstate";
 import { parseMachinesFromFile } from "xstate-parser-demo";
 
 export const probotApp = (app: Probot) => {
-  app.on(["push", "installation.deleted", "installation.suspend", "installation_repositories.removed"], async context => {
-    await forwardDocumentationEvent(context.name, context.id, context.payload);
+  app.on("push", async context => {
+    if (!process.env.STATELY_DOCUMENTATION_WEBHOOK_URL) return;
+    const { ref, after, deleted, repository, installation } = context.payload;
+    if (deleted || !repository.default_branch || ref !== `refs/heads/${repository.default_branch}` || !installation) return;
+    await forwardDocumentationEvent(context.name, context.id, {
+      ref, after, deleted,
+      repository: { id: repository.id, full_name: repository.full_name, default_branch: repository.default_branch },
+      installation: { id: installation.id },
+    });
+  });
+  app.on(["installation.deleted", "installation.suspend"], async context => {
+    await forwardDocumentationEvent(context.name, context.id, {
+      action: context.payload.action, installation: { id: context.payload.installation.id },
+    });
+  });
+  app.on("installation_repositories.removed", async context => {
+    await forwardDocumentationEvent(context.name, context.id, {
+      action: context.payload.action, installation: { id: context.payload.installation.id },
+      repositories_removed: context.payload.repositories_removed.map(repository => ({ id: repository.id })),
+    });
   });
   app.on("pull_request.synchronize", async (context) => {
     const headSha = context.payload.pull_request.head.sha;

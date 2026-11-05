@@ -28,11 +28,15 @@ For more, check out the [Contributing Guide](CONTRIBUTING.md).
 
 ## Managed documentation
 
-<!-- event forwarding and configuration from lib/documentation.ts, lib/app.ts, pages/api/webhook.ts, and app.yml -->
+<!-- event forwarding and configuration from lib/documentation.ts, lib/webhook.ts, lib/app.ts, pages/api/webhook.ts, and app.yml -->
 
 The existing `stately-github` registration can also maintain application
 feature documentation. After Probot verifies a GitHub event, this host forwards
-push, installation deletion/suspension and repository-removal events to Registry.
+non-deletion pushes on the default branch, installation deletion/suspension and
+repository-removal events to Registry. Push forwarding contains only the branch,
+commit and installation/repository identity fields; commit messages and other
+unused payload data are omitted. Large commit lists do not enlarge the forwarded
+message beyond Registry's one-megabyte ingestion bound.
 Registry pairs repositories to projects, queues generation and stores separate
 reviewable drafts. This host receives no Stately project key and performs no
 Stately model writes. PR visualizations keep their existing handler.
@@ -60,4 +64,10 @@ Registry also needs the same registration's app ID and private key for source re
 Use a trusted HTTPS endpoint with no query string; redirects are rejected. An unset
 forwarding URL disables documentation forwarding. Registry must be deployed,
 migrated and enabled before this URL and the app's push subscription are activated.
+The HTTP route enforces a 25 MiB limit on bytes actually read, including chunked
+requests, and rejects invalid UTF-8. It verifies the exact signed string using
+Probot before parsing JSON and dispatching the event. The legacy middleware path
+bypass patch is removed; `/api/webhook` is the single configured entry point.
+Host/proxy limits can be lower than this application bound. Production webhook
+delivery must be checked against those limits during activation.
 No live app settings or credentials are changed by this repository update.
