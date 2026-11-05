@@ -1,109 +1,158 @@
-import { Probot } from "probot";
-import lzString from "lz-string";
-import { createMachine } from "xstate";
-import { parseMachinesFromFile } from "xstate-parser-demo";
+import { createAppAuth } from "@octokit/auth-app";
+import { Octokit } from "@octokit/rest";
+import { z } from "zod";
+import type { Config } from "./config.js";
+import { forwardDocumentationEvent } from "./documentation.js";
+import { updatePullRequestDiagrams } from "./pull-requests.js";
+import { WebhookError } from "./webhook.js";
 
-export const probotApp = (app: Probot) => {
-  app.on("pull_request.synchronize", async (context) => {
-    const headSha = context.payload.pull_request.head.sha;
-    const baseSha = context.payload.pull_request.base.sha;
+const installation = z.object({ id: z.number().int().positive().safe() });
+const repository = z.object({
+  id: z.number().int().positive().safe(),
+  full_name: z
+    .string()
+    .regex(/^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}\/[a-zA-Z0-9_.-]{1,100}$/)
+    .refine((value) => ![".", ".."].includes(value.split("/")[1] ?? "")),
+  default_branch: z.string().min(1).max(1024),
+});
+const sha = z.string().regex(/^[a-f0-9]{40}$/);
+const push = z.object({
+  ref: z.string().max(2048),
+  after: sha,
+  deleted: z.boolean(),
+  repository,
+  installation: installation.optional(),
+});
+const lifecycle = z.object({ action: z.string().max(64), installation });
+const removal = lifecycle.extend({
+  repositories_removed: z
+    .array(z.object({ id: z.number().int().positive().safe() }))
+    .max(10_000),
+});
+const pullRequest = z.object({
+  action: z.string().max(64),
+  number: z.number().int().positive().safe(),
+  repository,
+  installation,
+  pull_request: z.object({ head: z.object({ sha }) }),
+});
 
-    // Delete all PR review comments made by this bot
-    const allReviewComments = await context.octokit.pulls.listReviewComments(
-      context.pullRequest(),
-    );
-
-    for (const comment of allReviewComments.data) {
-      // TODO - improve
-      if (
-        // If the bot made this comment
-        comment.user.login === "stately-github[bot]" &&
-        // and no-one has replied to it
-        !allReviewComments.data.some(
-          (otherComment) => otherComment.in_reply_to_id === comment.id,
-        )
-      ) {
-        await context.octokit.pulls.deleteReviewComment(
-          context.pullRequest({
-            comment_id: comment.id,
-          }),
-        );
-      }
-    }
-
-    const comparison = await context.octokit.repos.compareCommits(
-      context.repo({
-        base: baseSha,
-        head: headSha,
-      }),
-    );
-
-    const changedFiles = comparison.data.files || [];
-
-    for (const file of changedFiles) {
-      try {
-        const fileDetails = await context.octokit.repos.getContent(
-          context.repo({
-            path: file.filename,
-            ref: headSha,
-          }),
-        );
-
-        let fileContents = Buffer.from(
-          (fileDetails.data as any).content,
-          "base64",
-        ).toString();
-
-        const result = parseMachinesFromFile(fileContents);
-
-        const lineComments = new Set<number>();
-
-        for (const machineResult of result.machines) {
-          try {
-            const config = machineResult.toConfig();
-
-            const startLine =
-              machineResult.ast.definition?.node.loc?.start.line;
-
-            if (
-              config &&
-              typeof startLine === "number" &&
-              // If we haven't already commented on this line
-              !lineComments.has(startLine)
-            ) {
-              // Tests that it's valid
-              createMachine(config);
-
-              const str = lzString.compressToEncodedURIComponent(
-                JSON.stringify(config),
-              );
-
-              await context.octokit.pulls.createReviewComment(
-                context.pullRequest({
-                  body: [
-                    `![Visualisation](https://registry-d7xoh47z1-statelyai.vercel.app/registry/machine-by-definition/${str}.png)`,
-                    `[View on Stately Viz](https://xstate-viz-git-matt-added-an-embed-mode-which-b61eb7-statelyai.vercel.app/viz/view-only?machine=${str}&controls=1&pan=1&zoom=1)`,
-                  ].join("\n\n"),
-                  line: startLine,
-                  path: file.filename,
-                  commit_id: headSha,
-                }),
-              );
-              lineComments.add(startLine);
-              console.log("CREATED COMMENT");
-            }
-          } catch (e) {
-            console.log(e);
-          }
-        }
-      } catch (e) {
-        console.log(e);
-      }
-    }
+// No SDK error serialization: request errors can contain authorization and private source.
+const quietLog = { debug() {}, info() {}, warn() {}, error() {} };
+const githubFetch: typeof fetch = (input, init) => {
+  const url = new URL(
+    typeof input === "string"
+      ? input
+      : input instanceof URL
+        ? input
+        : input.url,
+  );
+  if (url.origin !== "https://api.github.com")
+    throw new Error("Unexpected GitHub API destination");
+  return fetch(input, {
+    ...init,
+    signal: init?.signal
+      ? AbortSignal.any([init.signal, AbortSignal.timeout(8000)])
+      : AbortSignal.timeout(8000),
+    redirect: "error",
   });
-  // For more information on building apps:
-  // https://probot.github.io/docs/
-
-  // To get your app running against GitHub, see:
-  // https://probot.github.io/docs/development/
 };
+
+export function createApp(
+  config: Config,
+  fetchImpl: typeof fetch = githubFetch,
+) {
+  function parse<T>(schema: z.ZodType<T>, value: unknown) {
+    const result = schema.safeParse(value);
+    if (!result.success) throw new WebhookError(400, "Invalid event payload");
+    return result.data;
+  }
+  return {
+    secret: config.WEBHOOK_SECRET,
+    async handleEvent(name: string, id: string, payload: unknown) {
+      switch (name) {
+        case "push": {
+          if (!config.STATELY_DOCUMENTATION_WEBHOOK_URL) return;
+          const event = parse(push, payload);
+          if (
+            event.deleted ||
+            event.ref !== `refs/heads/${event.repository.default_branch}` ||
+            !event.installation
+          )
+            return;
+          await forwardDocumentationEvent(name, id, event, config);
+          return;
+        }
+        case "installation": {
+          const event = parse(lifecycle, payload);
+          if (event.action === "deleted" || event.action === "suspend")
+            await forwardDocumentationEvent(name, id, event, config);
+          return;
+        }
+        case "installation_repositories": {
+          const event = parse(lifecycle, payload);
+          if (event.action === "removed")
+            await forwardDocumentationEvent(
+              name,
+              id,
+              parse(removal, payload),
+              config,
+            );
+          return;
+        }
+        case "pull_request": {
+          const event = parse(pullRequest, payload);
+          if (!["opened", "reopened", "synchronize"].includes(event.action))
+            return;
+          const signal = AbortSignal.timeout(8000);
+          const request = {
+            fetch: ((input, init) =>
+              fetchImpl(input, { ...init, signal })) satisfies typeof fetch,
+          };
+          const authOptions = {
+            appId: config.APP_ID,
+            privateKey: config.PRIVATE_KEY,
+          };
+          const appOctokit = new Octokit({
+            authStrategy: createAppAuth,
+            auth: authOptions,
+            request,
+            log: quietLog,
+          });
+          const auth = createAppAuth({
+            ...authOptions,
+            request: appOctokit.request,
+            log: quietLog,
+          });
+          // Mint explicitly: auth-app's request hook does not inherit repositoryIds/permissions.
+          const { token } = await auth({
+            type: "installation",
+            installationId: event.installation.id,
+            repositoryIds: [event.repository.id],
+            permissions: { contents: "read", pull_requests: "write" },
+          });
+          const octokit = new Octokit({ auth: token, request, log: quietLog });
+          const { data: app } = await appOctokit.rest.apps.getAuthenticated();
+          if (!app?.slug) throw new Error("Could not identify GitHub App");
+          const [owner, repo] = event.repository.full_name.split("/");
+          if (!owner || !repo)
+            throw new WebhookError(400, "Invalid repository");
+          await updatePullRequestDiagrams({
+            octokit,
+            owner,
+            repo,
+            repositoryId: event.repository.id,
+            pullNumber: event.number,
+            headSha: event.pull_request.head.sha,
+            botLogin: `${app.slug}[bot]`,
+            signal,
+          });
+          return;
+        }
+        // Unsubscribed/unknown actions are authenticated and acknowledged without work.
+        default:
+          return;
+      }
+    },
+  };
+}
