@@ -22,6 +22,7 @@ const environment = z.object({
         Buffer.byteLength(secret) >= 32 && Buffer.byteLength(secret) <= 1024,
     ),
   STATELY_VIZ_REVIEW_REPOSITORY_ID: z.union([z.string().regex(/^[1-9]\d{0,14}$/), z.literal("")]).optional(),
+  STATELY_VIZ_BROWSER_REPLAY: z.literal("1").or(z.literal("")).optional(),
   STATELY_VIZ_REVIEW_MODEL: z.string().trim().max(100).optional(),
   OPENAI_API_KEY: z.string().trim().max(1024).optional(),
   AI_GATEWAY_API_KEY: z.string().trim().max(1024).optional(),

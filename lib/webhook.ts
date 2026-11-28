@@ -19,9 +19,10 @@ type Options = {
   bodyTimeoutMs?: number;
 };
 
-function readBody(
+export function readBody(
   request: IncomingMessage,
   timeoutMs: number,
+  maxBytes = MAX_WEBHOOK_BYTES,
 ): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -49,7 +50,7 @@ function readBody(
         return;
       }
       size += chunk.length;
-      if (size > MAX_WEBHOOK_BYTES) {
+      if (size > maxBytes) {
         fail(new WebhookError(413, "Webhook body too large"));
         return;
       }

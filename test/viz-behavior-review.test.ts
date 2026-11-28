@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
+import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import nock from "nock";
 import { createApp } from "../lib/app.js";
 import type { ReviewEntry, ReviewInput } from "../lib/behavior-review-model.js";
 import { createWebhookHandler } from "../lib/webhook.js";
@@ -54,6 +56,7 @@ function github({ permission = "write", move = false } = {}) {
       });
       return json({ token: "ghs_synthetic", expires_at: new Date(Date.now() + 3600_000).toISOString() });
     }
+    if (url.pathname === "/repos/statelyai/viz/installation") return json({ id: 7 });
     if (url.pathname === "/app") return json({ id: 123, slug: "stately-github" });
     assert.match(url.pathname, /^\/repos\/statelyai\/viz\//);
     if (url.pathname.endsWith("/collaborators/reviewer/permission")) return json({ permission });
@@ -236,5 +239,70 @@ test("uses the gateway only for a prefixed OpenAI model", async () => {
       },
     });
     assert.deepEqual(entries, []);
+  }
+});
+
+test("an authenticated browser replay updates one comment and only flags base-pass head-fail", async () => {
+  const api = github();
+  const issuer = "https://token.actions.githubusercontent.com";
+  const audience = "stately-viz-browser-replay";
+  const { publicKey, privateKey } = await generateKeyPair("RS256");
+  const jwk = await exportJWK(publicKey);
+  const keyRequest = nock(issuer).get("/.well-known/jwks").reply(200, { keys: [{ ...jwk, kid: "replay-test" }] });
+  const app = createApp({ ...pilotConfig, STATELY_VIZ_BROWSER_REPLAY: "1" }, api.fetchImpl, {
+    analyze: async () => [
+      review,
+      { ...review, summary: "Second supported change." },
+      { ...review, summary: "Third supported change." },
+      { ...review, kind: "risk", summary: "Unverified model warning." },
+    ],
+  });
+  const host = await serve(async (request, response) => {
+    assert.equal(await app.handleReplayRequest(request, response), true);
+  });
+  const baseReceipt = {
+    pullNumber: 1, baseSha: base, headSha, artifactId: "15",
+    scenario: "resize-grip-reset", base: "pass", head: "fail",
+  };
+  const deliver = async (attempt: string, body: unknown, workflow = "main") => {
+    const authorization = await new SignJWT({
+      repository: "statelyai/viz", repository_id: "22", runner_environment: "github-hosted",
+      event_name: "pull_request_target", actor: "reviewer", run_id: "123",
+      run_attempt: attempt, workflow_ref: "statelyai/viz/.github/workflows/viz-browser-replay.yml@refs/heads/" + workflow,
+    }).setProtectedHeader({ alg: "RS256", kid: "replay-test" })
+      .setIssuer(issuer).setAudience(audience).setIssuedAt().setExpirationTime("5m").sign(privateKey);
+    const response = await fetch(host.url + "?browser-replay", {
+      method: "POST", headers: { authorization: "Bearer " + authorization },
+      body: JSON.stringify(body),
+    });
+    return response.status;
+  };
+  const replayLinks = (body: string | undefined) =>
+    [...(body ?? "").matchAll(/^\- \[Double-clicking the resize grip fails to reset the panel width\.\]\(([^)]+)\)$/gm)].map(match => match[1]);
+  try {
+    await app.handleEvent("pull_request", randomUUID(), event);
+    assert.equal(api.writes.length, 0, "Only the replay callback may publish");
+    assert.equal(await deliver("1", baseReceipt, "untrusted"), 401);
+    assert.equal(await deliver("1", { ...baseReceipt, artifactId: "https://example.com" }), 400);
+    assert.equal(await deliver("1", { ...baseReceipt, baseSha: newer }), 204);
+    assert.equal(api.writes.length, 0);
+    assert.deepEqual(await Promise.all([deliver("1", baseReceipt), deliver("1", baseReceipt)]), [204, 204]);
+    assert.equal(api.writes.length, 1);
+    assert.deepEqual(replayLinks(api.writes[0]?.body), ["https://github.com/statelyai/viz/actions/runs/123/artifacts/15"]);
+    assert.doesNotMatch(api.writes[0]?.body ?? "", /Unverified model warning|Third supported change/);
+    assert.equal(api.writes[0]?.body.match(/^- \[/gm)?.length, 3);
+    assert.equal(await deliver("1", baseReceipt), 204);
+    assert.equal(api.writes.length, 1);
+    assert.equal(await deliver("2", { ...baseReceipt, head: "pass" }), 204);
+    assert.equal(await deliver("3", { ...baseReceipt, base: "fail" }), 204);
+    assert.equal(await deliver("4", { ...baseReceipt, head: "inconclusive" }), 204);
+    assert.deepEqual(api.writes.map(write => write.method), ["POST", "PATCH", "PATCH", "PATCH"]);
+    for (const write of api.writes.slice(1)) assert.deepEqual(replayLinks(write.body), []);
+    assert.equal(await deliver("1", baseReceipt), 204);
+    assert.equal(api.writes.length, 4);
+    keyRequest.done();
+  } finally {
+    await host.close();
+    nock.cleanAll();
   }
 });
