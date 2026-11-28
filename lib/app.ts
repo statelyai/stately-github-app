@@ -82,6 +82,22 @@ export function createApp(
     if (!result.success) throw new WebhookError(400, "Invalid event payload");
     return result.data;
   }
+  function enqueueReview(pull: number, run: () => Promise<void>) {
+    let queue = activeReviews.get(pull);
+    if ((!queue && activeReviews.size >= 4) || queue?.count === 2)
+      throw new WebhookError(503, "Behavior review capacity exceeded");
+    if (!queue) {
+      queue = { count: 0, tail: Promise.resolve() };
+      activeReviews.set(pull, queue);
+    }
+    const scheduled = queue;
+    scheduled.count++;
+    const work = scheduled.tail.catch(() => undefined).then(run).finally(() => {
+      if (--scheduled.count === 0) activeReviews.delete(pull);
+    });
+    scheduled.tail = work;
+    return work;
+  }
   function appClient(signal: AbortSignal) {
     const request = {
       fetch: ((input, init) => fetchImpl(input, { ...init, signal })) satisfies typeof fetch,
@@ -122,23 +138,25 @@ export function createApp(
         response.end();
         return true;
       }
-      await receiveReplay(request, response, id, async (replay, username) => {
+      await receiveReplay(request, response, id, (replay, username) => {
         const signal = AbortSignal.timeout(45_000);
-        const { appOctokit } = appClient(signal);
-        const { data } = await appOctokit.rest.apps.getRepoInstallation({ owner: "statelyai", repo: "viz" });
-        await runPullRequest({ installation: { id: data.id }, repository: { id: Number(id) } }, signal, github =>
-          reviewVizPullRequest({
-            ...github,
-            repositoryId: Number(id),
-            pullNumber: replay.pullNumber,
-            headSha: replay.headSha,
-            username,
-            replay,
-            analyze: options.analyze ?? analyzeBehavior,
-            model,
-            getModelKey: () => getModelKey(model),
-          }),
-        );
+        return enqueueReview(replay.pullNumber, async () => {
+          const { appOctokit } = appClient(signal);
+          const { data } = await appOctokit.rest.apps.getRepoInstallation({ owner: "statelyai", repo: "viz" });
+          await runPullRequest({ installation: { id: data.id }, repository: { id: Number(id) } }, signal, github =>
+            reviewVizPullRequest({
+              ...github,
+              repositoryId: Number(id),
+              pullNumber: replay.pullNumber,
+              headSha: replay.headSha,
+              username,
+              replay,
+              analyze: options.analyze ?? analyzeBehavior,
+              model,
+              getModelKey: () => getModelKey(model),
+            }),
+          );
+        });
       });
       return true;
     },
@@ -182,17 +200,8 @@ export function createApp(
           if (isVizPilot) {
             const model = config.STATELY_VIZ_REVIEW_MODEL;
             if (!trigger || !model || config.STATELY_VIZ_BROWSER_REPLAY === "1") return;
-            let queue = activeReviews.get(event.number);
-            if ((!queue && activeReviews.size >= 4) || queue?.count === 2)
-              throw new WebhookError(503, "Behavior review capacity exceeded");
-            if (!queue) {
-              queue = { count: 0, tail: Promise.resolve() };
-              activeReviews.set(event.number, queue);
-            }
-            const scheduled = queue;
-            scheduled.count++;
             const signal = AbortSignal.timeout(45_000);
-            const work = scheduled.tail.catch(() => undefined).then(() =>
+            const work = enqueueReview(event.number, () =>
               runPullRequest(event, signal, async (github) => {
                 await reviewVizPullRequest({
                   ...github,
@@ -205,10 +214,7 @@ export function createApp(
                   getModelKey: () => getModelKey(model),
                 });
               }),
-            ).finally(() => {
-              if (--scheduled.count === 0) activeReviews.delete(event.number);
-            });
-            scheduled.tail = work;
+            );
             if (options.waitUntil) {
               options.waitUntil(work.catch(() => {
                 console.error(JSON.stringify({ event: "behavior_review_failed", deliveryId: id }));

@@ -281,7 +281,7 @@ test("an authenticated browser replay updates one comment and only flags base-pa
     assert.equal(await deliver("1", { ...baseReceipt, artifactId: "https://example.com" }), 400);
     assert.equal(await deliver("1", { ...baseReceipt, baseSha: newer }), 204);
     assert.equal(api.writes.length, 0);
-    assert.equal(await deliver("1", baseReceipt), 204);
+    assert.deepEqual(await Promise.all([deliver("1", baseReceipt), deliver("1", baseReceipt)]), [204, 204]);
     assert.equal(api.writes.length, 1);
     assert.deepEqual(replayLinks(api.writes[0]?.body), ["https://github.com/statelyai/viz/actions/runs/123/artifacts/15"]);
     assert.doesNotMatch(api.writes[0]?.body ?? "", /Unverified model warning/);

@@ -84,7 +84,12 @@ export async function receiveReplay(
   try {
     await publish({ ...run, runId: identity.run_id, runAttempt: identity.run_attempt }, identity.actor);
     send(204);
-  } catch {
+  } catch (error) {
+    if (error instanceof WebhookError && error.status === 503) {
+      response.setHeader("Retry-After", "1");
+      send(503);
+      return;
+    }
     console.error(JSON.stringify({ event: "browser_replay_publish_failed", runId: identity.run_id }));
     send(502);
   }
