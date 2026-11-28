@@ -170,7 +170,11 @@ test("rendered prose and diagram labels cannot add links, mentions, markup or a 
   ]);
   assert.ok(!body.includes("@everyone"));
   assert.ok(!body.includes("<img>"));
-  assert.ok(!body.includes("https://example.com"));
+  const links = [...body.matchAll(/\]\(([^)\n]+)\)/g)].map((match) => match[1]);
+  assert.deepEqual(links, [
+    "#user-content-stately-viz-1-bbbbbbbb-aaaaaaaaaaaa-flow-1",
+    "https://github.com/statelyai/viz/blob/" + headSha + "/" + file + "#L4",
+  ]);
   assert.ok(body.includes("#64;everyone"));
 });
 
