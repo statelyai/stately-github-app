@@ -6,7 +6,11 @@ import { createWebhookHandler } from "./webhook.js";
 const port = Number(process.env.PORT ?? 3000);
 if (!Number.isInteger(port) || port < 0 || port > 65535)
   throw new Error("Invalid PORT");
-const server = createServer(createWebhookHandler(createApp(readConfig())));
+const app = createApp(readConfig());
+const webhook = createWebhookHandler(app);
+const server = createServer(async (request, response) => {
+  if (!await app.handleReplayRequest(request, response)) await webhook(request, response);
+});
 server.headersTimeout = 10_000;
 server.requestTimeout = 15_000;
 server.maxRequestsPerSocket = 100;

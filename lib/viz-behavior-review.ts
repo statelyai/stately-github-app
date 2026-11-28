@@ -1,6 +1,8 @@
 import type { Octokit } from "@octokit/rest";
 import { z } from "zod";
 import { analyzeBehavior, contextSchema, verifiedEntries } from "./behavior-review-model.js";
+import { regressionUrl, replayAlreadyReported } from "./browser-replay.js";
+import type { ReplayReceipt } from "./browser-replay.js";
 import type { ReviewEntry, ReviewFile, ReviewRule } from "./behavior-review-model.js";
 
 export const VIZ_REVIEW_LABEL = "stately:behavior-review";
@@ -23,6 +25,7 @@ type ReviewRequest = {
   repositoryId: number;
   pullNumber: number;
   headSha: string;
+  replay?: ReplayReceipt;
   botLogin: string;
   username: string;
   signal: AbortSignal;
@@ -61,6 +64,7 @@ export function renderBehaviorComment(
   base: string,
   head: string,
   entries: ReviewEntry[],
+  replay?: ReplayReceipt,
 ) {
   const anchor = (index: number) =>
     "stately-viz-" + pullNumber + "-" + base.slice(0, 8) + "-" + head.slice(0, 12) + "-flow-" + (index + 1);
@@ -89,10 +93,16 @@ export function renderBehaviorComment(
       "</details>",
     ].join("\n");
   });
+  const regression = regressionUrl(replay);
   return [
     MARKER + base + ":" + head + " -->",
+    ...(replay ? ["<!-- stately-browser-replay:" + replay.runId + ":" + replay.runAttempt + " -->"] : []),
     "### What changed for users",
     ...(summary.length ? summary : ["No supported user-visible change found at `" + current + "`."]),
+    ...(regression ? [
+      "### Browser-confirmed regression",
+      "- [Double-clicking the resize grip fails to reset the panel width.](" + regression + ")",
+    ] : []),
     ...details,
   ].join("\n\n");
 }
@@ -120,6 +130,8 @@ export async function reviewVizPullRequest(request: ReviewRequest) {
     return;
 
   const baseSha = current.base.sha;
+  const { replay } = request;
+  if (replay && replay.baseSha !== baseSha) return;
   const findComment = async () => {
     let pages = 0;
     for await (const page of octokit.paginate.iterator(octokit.rest.issues.listComments, {
@@ -137,7 +149,9 @@ export async function reviewVizPullRequest(request: ReviewRequest) {
   };
 
   const existing = await findComment();
-  if (existing?.body?.startsWith(MARKER + baseSha + ":" + headSha + " -->")) return;
+  const alreadyReported = (body: string | undefined) =>
+    body?.startsWith(MARKER + baseSha + ":" + headSha + " -->") && replayAlreadyReported(body, replay);
+  if (alreadyReported(existing?.body ?? undefined)) return;
 
   const { data: comparison } = await octokit.rest.repos.compareCommitsWithBasehead({
     ...repo, basehead: baseSha + "..." + headSha, per_page: 1,
@@ -157,25 +171,32 @@ export async function reviewVizPullRequest(request: ReviewRequest) {
   }
 
   const rules = await readRules(octokit, repo, baseSha, files);
-  const entries = files.length ? verifiedEntries(
-    (await request.analyze({ files, rules }, {
-      model: request.model, apiKey: await request.getModelKey(), signal,
-    })).filter(({ kind }) => kind === "change"),
-    files,
-  ) : [];
+  let entries: ReviewEntry[] = [];
+  try {
+    entries = files.length ? verifiedEntries(
+      (await request.analyze({ files, rules }, {
+        model: request.model,
+        apiKey: await request.getModelKey(),
+        signal: replay ? AbortSignal.any([signal, AbortSignal.timeout(25_000)]) : signal,
+      })).filter(({ kind }) => kind === "change"),
+      files,
+    ) : [];
+  } catch (error) {
+    if (!replay) throw error;
+  }
 
-  if (!entries.length && !existing) return;
+  if (!entries.length && !existing && !regressionUrl(replay)) return;
   const latest = await octokit.rest.pulls.get(pull);
   if (latest.data.state !== "open" || latest.data.head.sha !== headSha ||
       latest.data.base.sha !== baseSha || !latest.data.labels.some(({ name }) => name === VIZ_REVIEW_LABEL))
     return;
 
   const comment = await findComment();
-  if (comment?.body?.startsWith(MARKER + baseSha + ":" + headSha + " -->")) return;
-  const body = renderBehaviorComment(pullNumber, baseSha, headSha, entries);
+  if (alreadyReported(comment?.body ?? undefined)) return;
+  const body = renderBehaviorComment(pullNumber, baseSha, headSha, entries, replay);
   if (comment) {
     await octokit.rest.issues.updateComment({ ...repo, comment_id: comment.id, body });
-  } else if (entries.length) {
+  } else {
     await octokit.rest.issues.createComment({ ...issue, body });
   }
 }

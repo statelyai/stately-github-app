@@ -82,12 +82,20 @@ the configured OpenAI model, directly or through Vercel AI Gateway. It only read
 `.github/stately-behavior-review.json` at the PR's base commit. Rules describe
 expected behavior. The app checks cited lines against the head-side diff
 before publishing. Model-generated risk candidates are for evaluation. The
-comment contains source-cited behavior changes.
+comment contains source-cited behavior changes and replay-confirmed regressions when browser replay is enabled.
 
 The app creates or updates its own top-level comment with up to three linked
 items. Each link opens a collapsible flow with its commit-pinned source.
 GitHub renders these flows inside the private PR. A comment shows one revision
-at a time. A run with no supported change leaves an empty PR discussion alone.
+at a time. A run with no supported change or confirmed regression leaves an
+empty PR discussion alone.
+
+<!-- browser receipt validation and replay links from lib/browser-replay.ts and lib/viz-behavior-review.ts -->
+
+The optional Viz workflow runs the same browser check on the base and head.
+The comment flags a head failure only when the base passed. The flag links
+directly to the private GitHub Actions artifact with both Playwright traces.
+A timed-out browser check or a pre-existing failure produces no flag.
 
 ## Managed documentation
 
@@ -166,6 +174,15 @@ the gateway. Unprefixed OpenAI models use the direct endpoint with
 `OPENAI_API_KEY`. Leave the repository ID unset to disable the pilot. The existing `pull_request` subscription is sufficient.
 Vercel acknowledges the request and runs the analysis via `waitUntil`.
 The standalone listener waits for the analysis to finish.
+
+Set `STATELY_VIZ_BROWSER_REPLAY=1` after the trusted
+`.github/workflows/viz-browser-replay.yml` workflow is present on Viz `main`.
+Set the Viz Actions variable `STATELY_VIZ_BROWSER_REPLAY_URL` to the isolated
+pilot URL at `/api/webhook?browser-replay`. The pilot waits for a receipt from
+that workflow before posting. GitHub OIDC authenticates the publisher and
+binds the evidence to its workflow run. The browser job has read access to
+source and runs each revision in an isolated container without egress. The
+publishing job receives the receipt and never executes code from the PR.
 
 A request has a 45-second deadline. Each app instance retains one pending
 request per active PR and responds with 503 when capacity is exhausted.

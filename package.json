@@ -24,6 +24,7 @@
     "@octokit/rest": "^22.0.1",
     "@vercel/functions": "^3.11.4",
     "@xstate/machine-extractor": "^0.16.0",
+    "jose": "6.2.18",
     "xstate": "^4.38.3",
     "zod": "^4.6.7"
   },

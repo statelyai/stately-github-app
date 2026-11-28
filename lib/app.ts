@@ -7,6 +7,8 @@ import { forwardDocumentationEvent } from "./documentation.js";
 import { updatePullRequestDiagrams } from "./pull-requests.js";
 import { analyzeBehavior } from "./behavior-review-model.js";
 import { reviewVizPullRequest, VIZ_REPOSITORY, VIZ_REVIEW_LABEL } from "./viz-behavior-review.js";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { receiveReplay, REPLAY_PATH } from "./browser-replay.js";
 import { WebhookError } from "./webhook.js";
 
 const installation = z.object({ id: z.number().int().positive().safe() });
@@ -80,23 +82,21 @@ export function createApp(
     if (!result.success) throw new WebhookError(400, "Invalid event payload");
     return result.data;
   }
-  async function runPullRequest(
-    event: z.infer<typeof pullRequest>,
-    signal: AbortSignal,
-    run: (github: { octokit: Octokit; botLogin: string; signal: AbortSignal }) => Promise<void>,
-  ) {
+  function appClient(signal: AbortSignal) {
     const request = {
       fetch: ((input, init) => fetchImpl(input, { ...init, signal })) satisfies typeof fetch,
     };
     const authOptions = { appId: config.APP_ID, privateKey: config.PRIVATE_KEY };
-    const appOctokit = new Octokit({
-      authStrategy: createAppAuth,
-      auth: authOptions,
-      request,
-      log: quietLog,
-    });
+    const appOctokit = new Octokit({ authStrategy: createAppAuth, auth: authOptions, request, log: quietLog });
+    return { appOctokit, request, authOptions };
+  }
+  async function runPullRequest(
+    event: { installation: { id: number }; repository: { id: number } },
+    signal: AbortSignal,
+    run: (github: { octokit: Octokit; botLogin: string; signal: AbortSignal }) => Promise<void>,
+  ) {
+    const { appOctokit, request, authOptions } = appClient(signal);
     const auth = createAppAuth({ ...authOptions, request: appOctokit.request, log: quietLog });
-    // The automatic token request does not inherit repositoryIds or permissions.
     const { token } = await auth({
       type: "installation",
       installationId: event.installation.id,
@@ -108,8 +108,40 @@ export function createApp(
     if (!app?.slug) throw new Error("Could not identify GitHub App");
     await run({ octokit, botLogin: app.slug + "[bot]", signal });
   }
+  const getModelKey = (model: string) => model.startsWith("openai/")
+    ? config.AI_GATEWAY_API_KEY || getVercelOidcToken()
+    : config.OPENAI_API_KEY ?? "";
   return {
     secret: config.WEBHOOK_SECRET,
+    async handleReplayRequest(request: IncomingMessage, response: ServerResponse) {
+      if (request.url !== REPLAY_PATH) return false;
+      const model = config.STATELY_VIZ_REVIEW_MODEL;
+      const id = config.STATELY_VIZ_REVIEW_REPOSITORY_ID;
+      if (config.STATELY_VIZ_BROWSER_REPLAY !== "1" || !id || !model) {
+        response.statusCode = 404;
+        response.end();
+        return true;
+      }
+      await receiveReplay(request, response, id, async (replay, username) => {
+        const signal = AbortSignal.timeout(45_000);
+        const { appOctokit } = appClient(signal);
+        const { data } = await appOctokit.rest.apps.getRepoInstallation({ owner: "statelyai", repo: "viz" });
+        await runPullRequest({ installation: { id: data.id }, repository: { id: Number(id) } }, signal, github =>
+          reviewVizPullRequest({
+            ...github,
+            repositoryId: Number(id),
+            pullNumber: replay.pullNumber,
+            headSha: replay.headSha,
+            username,
+            replay,
+            analyze: options.analyze ?? analyzeBehavior,
+            model,
+            getModelKey: () => getModelKey(model),
+          }),
+        );
+      });
+      return true;
+    },
     async handleEvent(name: string, id: string, payload: unknown) {
       switch (name) {
         case "push": {
@@ -149,7 +181,7 @@ export function createApp(
             ? event.sender : undefined;
           if (isVizPilot) {
             const model = config.STATELY_VIZ_REVIEW_MODEL;
-            if (!trigger || !model) return;
+            if (!trigger || !model || config.STATELY_VIZ_BROWSER_REPLAY === "1") return;
             let queue = activeReviews.get(event.number);
             if ((!queue && activeReviews.size >= 4) || queue?.count === 2)
               throw new WebhookError(503, "Behavior review capacity exceeded");
@@ -170,9 +202,7 @@ export function createApp(
                   username: trigger.login,
                   analyze: options.analyze ?? analyzeBehavior,
                   model,
-                  getModelKey: () => model.startsWith("openai/")
-                    ? config.AI_GATEWAY_API_KEY || getVercelOidcToken()
-                    : config.OPENAI_API_KEY ?? "",
+                  getModelKey: () => getModelKey(model),
                 });
               }),
             ).finally(() => {

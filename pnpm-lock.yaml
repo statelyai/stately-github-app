@@ -20,6 +20,9 @@ importers:
       '@xstate/machine-extractor':
         specifier: ^0.16.0
         version: 0.16.0(xstate@4.38.3)
+      jose:
+        specifier: 6.2.18
+        version: 6.2.18
       xstate:
         specifier: ^4.38.3
         version: 4.38.3
@@ -429,6 +432,9 @@ packages:
 
   isexe@2.0.0:
     resolution: {integrity: sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw==}
+
+  jose@6.2.18:
+    resolution: {integrity: sha512-doV4thUwgkrycJH4yLeqwTGIIZphHl+pk7CPReuMIhYhncmgzdko85MaCG4YQFTxqMFr1/oEH32tZuKKovcDEg==}
 
   js-tokens@4.0.0:
     resolution: {integrity: sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ==}
@@ -920,6 +926,8 @@ snapshots:
   is-stream@2.0.1: {}
 
   isexe@2.0.0: {}
+
+  jose@6.2.18: {}
 
   js-tokens@4.0.0: {}
 
