@@ -1,3 +1,4 @@
+import { waitUntil } from "@vercel/functions";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createApp } from "../lib/app.js";
 import { readConfig } from "../lib/config.js";
@@ -9,7 +10,9 @@ export default async function webhook(
   response: ServerResponse,
 ) {
   try {
-    handler ??= createWebhookHandler(createApp(readConfig()));
+    handler ??= createWebhookHandler(createApp(readConfig(), undefined, {
+      waitUntil,
+    }));
   } catch {
     console.error(JSON.stringify({ event: "invalid_app_configuration" }));
     response.writeHead(503, {

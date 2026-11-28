@@ -67,6 +67,28 @@ redelivered from GitHub; no partial pending review is created before the final
 head check. Distributed simultaneous deliveries can still race to post a review;
 GitHub's review API has no idempotency key. See [security boundaries](SECURITY.md).
 
+## On-demand Viz behavior review
+
+<!-- pilot trigger, model config, read scope and comment from lib/app.ts, lib/config.ts, lib/viz-behavior-review.ts, and lib/behavior-review-model.ts -->
+
+The existing app can review user-visible changes in the Viz repository without
+a Stately project. A user with repository write access applies
+`stately:behavior-review` to an open PR. Remove and reapply the label to review
+a new revision. For this repository the pilot replaces automatic inline
+diagrams while enabled. Other repositories keep their existing behavior.
+
+The app sends a bounded set of editor patches and matching behavior rules to
+the configured OpenAI model, directly or through Vercel AI Gateway. It only reads rules from
+`.github/stately-behavior-review.json` at the PR's base commit. Rules describe
+expected behavior. The app checks cited lines against the head-side diff
+before publishing. Model-generated risk candidates are for evaluation. The
+comment contains source-cited behavior changes.
+
+The app creates or updates its own top-level comment with up to three linked
+items. Each link opens a collapsible flow with its commit-pinned source.
+GitHub renders these flows inside the private PR. A comment shows one revision
+at a time. A run with no supported change leaves an empty PR discussion alone.
+
 ## Managed documentation
 
 <!-- forwarded payloads and configuration from lib/app.ts and lib/documentation.ts -->
@@ -134,3 +156,18 @@ Set `STATELY_DOCUMENTATION_WEBHOOK_URL` to
 migrated and enabled. Registry's `STATELY_GITHUB_WEBHOOK_SECRET` must match this
 host's `WEBHOOK_SECRET`. Registry separately needs the existing app ID/private key
 for its own repository-scoped reads. No repository or Stately user key is needed.
+
+To enable the Viz pilot, create the `stately:behavior-review` label in Viz and
+set `STATELY_VIZ_REVIEW_REPOSITORY_ID` to the verified GitHub repository ID.
+Set `STATELY_VIZ_REVIEW_MODEL` to an OpenAI model that supports Structured
+Outputs. Use `openai/gpt-5-mini` to route through Vercel AI Gateway with the
+deployment's OIDC identity. Outside Vercel, provide `AI_GATEWAY_API_KEY` for
+the gateway. Unprefixed OpenAI models use the direct endpoint with
+`OPENAI_API_KEY`. Leave the repository ID unset to disable the pilot. The existing `pull_request` subscription is sufficient.
+Vercel acknowledges the request and runs the analysis via `waitUntil`.
+The standalone listener waits for the analysis to finish.
+
+The analysis has a 45-second deadline. The app checks its own comment marker
+before analysis and immediately before publication. Simultaneous requests on
+different instances can still race at creation because GitHub has no atomic
+find-or-create API for issue comments.
