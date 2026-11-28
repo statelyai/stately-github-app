@@ -167,7 +167,9 @@ the gateway. Unprefixed OpenAI models use the direct endpoint with
 Vercel acknowledges the request and runs the analysis via `waitUntil`.
 The standalone listener waits for the analysis to finish.
 
-The analysis has a 45-second deadline. The app checks its own comment marker
+A request has a 45-second deadline. Each app instance retains one pending
+request per active PR and responds with 503 when capacity is exhausted.
+The app checks its own comment marker
 before analysis and immediately before publication. Simultaneous requests on
 different instances can still race at creation because GitHub has no atomic
 find-or-create API for issue comments.

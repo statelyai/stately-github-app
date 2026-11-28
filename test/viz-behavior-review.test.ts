@@ -134,6 +134,41 @@ test("a signed on-demand delivery uses base rules and creates one private linked
   }
 });
 
+test("retains a manual trigger for a new revision while the old review is running", async () => {
+  const api = github();
+  const firstAnalysis = Promise.withResolvers<void>();
+  const releaseFirst = Promise.withResolvers<void>();
+  const jobs: Promise<void>[] = [];
+  let analyses = 0;
+  const app = createApp(pilotConfig, api.fetchImpl, {
+    waitUntil: (work) => jobs.push(work),
+    analyze: async () => {
+      if (++analyses === 1) {
+        firstAnalysis.resolve();
+        await releaseFirst.promise;
+      }
+      return [review];
+    },
+  });
+  await app.handleEvent("pull_request", randomUUID(), event);
+  try {
+    await firstAnalysis.promise;
+    api.advance();
+    await app.handleEvent("pull_request", randomUUID(), {
+      ...event, pull_request: { head: { sha: newer } },
+    });
+    assert.equal(jobs.length, 2);
+    assert.equal(analyses, 1);
+  } finally {
+    releaseFirst.resolve();
+    await Promise.all(jobs);
+  }
+  assert.equal(analyses, 2);
+  assert.equal(api.writes.length, 1);
+  assert.equal(api.writes[0]!.method, "POST");
+  assert.match(api.writes[0]!.body, /stately-viz-1-bbbbbbbb-cccccccccccc-flow-1/);
+});
+
 test("enabled pilot ignores automatic deliveries, other labels, bots, and other repos", async () => {
   const app = createApp(pilotConfig, async () => { throw new Error("Unexpected GitHub call"); });
   for (const input of [

@@ -74,7 +74,7 @@ export function createApp(
     analyze?: typeof analyzeBehavior;
   } = {},
 ) {
-  const activeReviews = new Set<number>();
+  const activeReviews = new Map<number, { count: number; tail: Promise<void> }>();
   function parse<T>(schema: z.ZodType<T>, value: unknown) {
     const result = schema.safeParse(value);
     if (!result.success) throw new WebhookError(400, "Invalid event payload");
@@ -149,23 +149,36 @@ export function createApp(
             ? event.sender : undefined;
           if (isVizPilot) {
             const model = config.STATELY_VIZ_REVIEW_MODEL;
-            if (!trigger || !model || activeReviews.size >= 4 || activeReviews.has(event.number))
-              return;
-            activeReviews.add(event.number);
-            const work = runPullRequest(event, AbortSignal.timeout(45_000), async (github) => {
-              await reviewVizPullRequest({
-                ...github,
-                repositoryId: event.repository.id,
-                pullNumber: event.number,
-                headSha: event.pull_request.head.sha,
-                username: trigger.login,
-                analyze: options.analyze ?? analyzeBehavior,
-                model,
-                getModelKey: () => model.startsWith("openai/")
-                  ? config.AI_GATEWAY_API_KEY || getVercelOidcToken()
-                  : config.OPENAI_API_KEY ?? "",
-              });
-            }).finally(() => activeReviews.delete(event.number));
+            if (!trigger || !model) return;
+            let queue = activeReviews.get(event.number);
+            if ((!queue && activeReviews.size >= 4) || queue?.count === 2)
+              throw new WebhookError(503, "Behavior review capacity exceeded");
+            if (!queue) {
+              queue = { count: 0, tail: Promise.resolve() };
+              activeReviews.set(event.number, queue);
+            }
+            const scheduled = queue;
+            scheduled.count++;
+            const signal = AbortSignal.timeout(45_000);
+            const work = scheduled.tail.catch(() => undefined).then(() =>
+              runPullRequest(event, signal, async (github) => {
+                await reviewVizPullRequest({
+                  ...github,
+                  repositoryId: event.repository.id,
+                  pullNumber: event.number,
+                  headSha: event.pull_request.head.sha,
+                  username: trigger.login,
+                  analyze: options.analyze ?? analyzeBehavior,
+                  model,
+                  getModelKey: () => model.startsWith("openai/")
+                    ? config.AI_GATEWAY_API_KEY || getVercelOidcToken()
+                    : config.OPENAI_API_KEY ?? "",
+                });
+              }),
+            ).finally(() => {
+              if (--scheduled.count === 0) activeReviews.delete(event.number);
+            });
+            scheduled.tail = work;
             if (options.waitUntil) {
               options.waitUntil(work.catch(() => {
                 console.error(JSON.stringify({ event: "behavior_review_failed", deliveryId: id }));
