@@ -250,7 +250,7 @@ test("an authenticated browser replay updates one comment and only flags base-pa
   const jwk = await exportJWK(publicKey);
   const keyRequest = nock(issuer).get("/.well-known/jwks").reply(200, { keys: [{ ...jwk, kid: "replay-test" }] });
   const app = createApp({ ...pilotConfig, STATELY_VIZ_BROWSER_REPLAY: "1" }, api.fetchImpl, {
-    analyze: async () => [review, { ...review, kind: "risk" }],
+    analyze: async () => [review, { ...review, kind: "risk", summary: "Unverified model warning." }],
   });
   const host = await serve(async (request, response) => {
     assert.equal(await app.handleReplayRequest(request, response), true);
@@ -272,7 +272,8 @@ test("an authenticated browser replay updates one comment and only flags base-pa
     });
     return response.status;
   };
-  const replayLink = "https://github.com/statelyai/viz/actions/runs/123/artifacts/15";
+  const replayLinks = (body: string | undefined) =>
+    [...(body ?? "").matchAll(/^\- \[Double-clicking the resize grip fails to reset the panel width\.\]\(([^)]+)\)$/gm)].map(match => match[1]);
   try {
     await app.handleEvent("pull_request", randomUUID(), event);
     assert.equal(api.writes.length, 0, "Only the replay callback may publish");
@@ -282,14 +283,15 @@ test("an authenticated browser replay updates one comment and only flags base-pa
     assert.equal(api.writes.length, 0);
     assert.equal(await deliver("1", baseReceipt), 204);
     assert.equal(api.writes.length, 1);
-    assert.ok(api.writes[0]?.body.includes(replayLink));
+    assert.deepEqual(replayLinks(api.writes[0]?.body), ["https://github.com/statelyai/viz/actions/runs/123/artifacts/15"]);
+    assert.doesNotMatch(api.writes[0]?.body ?? "", /Unverified model warning/);
     assert.equal(await deliver("1", baseReceipt), 204);
     assert.equal(api.writes.length, 1);
     assert.equal(await deliver("2", { ...baseReceipt, head: "pass" }), 204);
     assert.equal(await deliver("3", { ...baseReceipt, base: "fail" }), 204);
     assert.equal(await deliver("4", { ...baseReceipt, head: "inconclusive" }), 204);
     assert.deepEqual(api.writes.map(write => write.method), ["POST", "PATCH", "PATCH", "PATCH"]);
-    for (const write of api.writes.slice(1)) assert.ok(!write.body.includes(replayLink));
+    for (const write of api.writes.slice(1)) assert.deepEqual(replayLinks(write.body), []);
     assert.equal(await deliver("1", baseReceipt), 204);
     assert.equal(api.writes.length, 4);
     keyRequest.done();
