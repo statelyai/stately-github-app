@@ -66,13 +66,15 @@ export function renderBehaviorComment(
   entries: ReviewEntry[],
   replay?: ReplayReceipt,
 ) {
+  const regression = regressionUrl(replay);
+  const changes = entries.slice(0, regression ? 2 : 3);
   const anchor = (index: number) =>
     "stately-viz-" + pullNumber + "-" + base.slice(0, 8) + "-" + head.slice(0, 12) + "-flow-" + (index + 1);
   const current = head.slice(0, 8);
-  const summary = entries.map((entry, index) =>
+  const summary = changes.map((entry, index) =>
     "- [" + markdown(entry.summary) + "](#user-content-" + anchor(index) + ")",
   );
-  const details = entries.map((entry, index) => {
+  const details = changes.map((entry, index) => {
     const source = "https://github.com/" + VIZ_REPOSITORY + "/blob/" + head + "/" +
       entry.evidence.path.split("/").map((segment) =>
         encodeURIComponent(segment).replace(/[()]/g, (character) => character === "(" ? "%28" : "%29"),
@@ -93,7 +95,6 @@ export function renderBehaviorComment(
       "</details>",
     ].join("\n");
   });
-  const regression = regressionUrl(replay);
   return [
     MARKER + base + ":" + head + " -->",
     ...(replay ? ["<!-- stately-browser-replay:" + replay.runId + ":" + replay.runAttempt + " -->"] : []),

@@ -250,7 +250,12 @@ test("an authenticated browser replay updates one comment and only flags base-pa
   const jwk = await exportJWK(publicKey);
   const keyRequest = nock(issuer).get("/.well-known/jwks").reply(200, { keys: [{ ...jwk, kid: "replay-test" }] });
   const app = createApp({ ...pilotConfig, STATELY_VIZ_BROWSER_REPLAY: "1" }, api.fetchImpl, {
-    analyze: async () => [review, { ...review, kind: "risk", summary: "Unverified model warning." }],
+    analyze: async () => [
+      review,
+      { ...review, summary: "Second supported change." },
+      { ...review, summary: "Third supported change." },
+      { ...review, kind: "risk", summary: "Unverified model warning." },
+    ],
   });
   const host = await serve(async (request, response) => {
     assert.equal(await app.handleReplayRequest(request, response), true);
@@ -284,7 +289,8 @@ test("an authenticated browser replay updates one comment and only flags base-pa
     assert.deepEqual(await Promise.all([deliver("1", baseReceipt), deliver("1", baseReceipt)]), [204, 204]);
     assert.equal(api.writes.length, 1);
     assert.deepEqual(replayLinks(api.writes[0]?.body), ["https://github.com/statelyai/viz/actions/runs/123/artifacts/15"]);
-    assert.doesNotMatch(api.writes[0]?.body ?? "", /Unverified model warning/);
+    assert.doesNotMatch(api.writes[0]?.body ?? "", /Unverified model warning|Third supported change/);
+    assert.equal(api.writes[0]?.body.match(/^- \[/gm)?.length, 3);
     assert.equal(await deliver("1", baseReceipt), 204);
     assert.equal(api.writes.length, 1);
     assert.equal(await deliver("2", { ...baseReceipt, head: "pass" }), 204);
