@@ -21,6 +21,10 @@ const environment = z.object({
       (secret) =>
         Buffer.byteLength(secret) >= 32 && Buffer.byteLength(secret) <= 1024,
     ),
+  STATELY_VIZ_REVIEW_REPOSITORY_ID: z.union([z.string().regex(/^[1-9]\d{0,14}$/), z.literal("")]).optional(),
+  STATELY_VIZ_REVIEW_MODEL: z.string().trim().max(100).optional(),
+  OPENAI_API_KEY: z.string().trim().max(1024).optional(),
+  AI_GATEWAY_API_KEY: z.string().trim().max(1024).optional(),
   STATELY_DOCUMENTATION_WEBHOOK_URL: z
     .union([httpsEndpoint, z.literal("")])
     .optional(),
@@ -30,6 +34,10 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
   const parsed = environment.safeParse(env);
   // Never include validation inputs or private-key parser errors in diagnostics.
   if (!parsed.success) throw new Error("Invalid GitHub App configuration");
+  const model = parsed.data.STATELY_VIZ_REVIEW_MODEL;
+  if (parsed.data.STATELY_VIZ_REVIEW_REPOSITORY_ID &&
+      (!model || (!model.startsWith("openai/") && !parsed.data.OPENAI_API_KEY)))
+    throw new Error("Invalid GitHub App configuration");
   const config = {
     ...parsed.data,
     PRIVATE_KEY: parsed.data.PRIVATE_KEY.trim().startsWith("-----BEGIN")

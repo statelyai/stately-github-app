@@ -13,8 +13,14 @@ The app is a webhook processor, not an agent that executes repository code.
   add evaluation, dynamic imports of source, or execution of repository scripts.
 - Mermaid uses generated IDs and encoded labels. No source-derived URLs, context
   values, action bodies, external thumbnails or rendering-service requests appear
-  in comments. Static previews do not establish application correctness.
-- The app never deletes comments or modifies existing discussions. Before posting
+  in legacy inline comments. Static previews do not establish application correctness.
+  The opt-in Viz pilot sends bounded editor patches and matching base-commit
+  rules to OpenAI, directly or through Vercel AI Gateway, with the request
+  configured to disable response storage. Pilot output stays in the
+  private PR and links only to generated anchors and commit-pinned source.
+- The app never deletes comments or changes another author's comment. The
+  Viz pilot updates only its own top-level comment with the pilot marker.
+  Before posting
   it rechecks the current open PR head. Markers are trusted only on this app's bot
   comments. A bounded warm-instance cache suppresses identical signed bodies,
   including replays with changed delivery IDs; it is not distributed storage.

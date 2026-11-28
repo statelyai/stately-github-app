@@ -1,9 +1,12 @@
 import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/rest";
 import { z } from "zod";
+import { getVercelOidcToken } from "@vercel/functions/oidc";
 import type { Config } from "./config.js";
 import { forwardDocumentationEvent } from "./documentation.js";
 import { updatePullRequestDiagrams } from "./pull-requests.js";
+import { analyzeBehavior } from "./behavior-review-model.js";
+import { reviewVizPullRequest, VIZ_REPOSITORY, VIZ_REVIEW_LABEL } from "./viz-behavior-review.js";
 import { WebhookError } from "./webhook.js";
 
 const installation = z.object({ id: z.number().int().positive().safe() });
@@ -34,6 +37,11 @@ const pullRequest = z.object({
   number: z.number().int().positive().safe(),
   repository,
   installation,
+  label: z.object({ name: z.string().max(100) }).optional(),
+  sender: z.object({
+    login: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}$/),
+    type: z.literal("User"),
+  }).optional().catch(undefined),
   pull_request: z.object({ head: z.object({ sha }) }),
 });
 
@@ -61,11 +69,44 @@ const githubFetch: typeof fetch = (input, init) => {
 export function createApp(
   config: Config,
   fetchImpl: typeof fetch = githubFetch,
+  options: {
+    waitUntil?: (work: Promise<void>) => void;
+    analyze?: typeof analyzeBehavior;
+  } = {},
 ) {
+  const activeReviews = new Map<number, { count: number; tail: Promise<void> }>();
   function parse<T>(schema: z.ZodType<T>, value: unknown) {
     const result = schema.safeParse(value);
     if (!result.success) throw new WebhookError(400, "Invalid event payload");
     return result.data;
+  }
+  async function runPullRequest(
+    event: z.infer<typeof pullRequest>,
+    signal: AbortSignal,
+    run: (github: { octokit: Octokit; botLogin: string; signal: AbortSignal }) => Promise<void>,
+  ) {
+    const request = {
+      fetch: ((input, init) => fetchImpl(input, { ...init, signal })) satisfies typeof fetch,
+    };
+    const authOptions = { appId: config.APP_ID, privateKey: config.PRIVATE_KEY };
+    const appOctokit = new Octokit({
+      authStrategy: createAppAuth,
+      auth: authOptions,
+      request,
+      log: quietLog,
+    });
+    const auth = createAppAuth({ ...authOptions, request: appOctokit.request, log: quietLog });
+    // The automatic token request does not inherit repositoryIds or permissions.
+    const { token } = await auth({
+      type: "installation",
+      installationId: event.installation.id,
+      repositoryIds: [event.repository.id],
+      permissions: { contents: "read", pull_requests: "write" },
+    });
+    const octokit = new Octokit({ auth: token, request, log: quietLog });
+    const { data: app } = await appOctokit.rest.apps.getAuthenticated();
+    if (!app?.slug) throw new Error("Could not identify GitHub App");
+    await run({ octokit, botLogin: app.slug + "[bot]", signal });
   }
   return {
     secret: config.WEBHOOK_SECRET,
@@ -102,50 +143,65 @@ export function createApp(
         }
         case "pull_request": {
           const event = parse(pullRequest, payload);
+          const isVizPilot = config.STATELY_VIZ_REVIEW_REPOSITORY_ID === String(event.repository.id) &&
+            event.repository.full_name.toLowerCase() === VIZ_REPOSITORY;
+          const trigger = event.action === "labeled" && event.label?.name === VIZ_REVIEW_LABEL
+            ? event.sender : undefined;
+          if (isVizPilot) {
+            const model = config.STATELY_VIZ_REVIEW_MODEL;
+            if (!trigger || !model) return;
+            let queue = activeReviews.get(event.number);
+            if ((!queue && activeReviews.size >= 4) || queue?.count === 2)
+              throw new WebhookError(503, "Behavior review capacity exceeded");
+            if (!queue) {
+              queue = { count: 0, tail: Promise.resolve() };
+              activeReviews.set(event.number, queue);
+            }
+            const scheduled = queue;
+            scheduled.count++;
+            const signal = AbortSignal.timeout(45_000);
+            const work = scheduled.tail.catch(() => undefined).then(() =>
+              runPullRequest(event, signal, async (github) => {
+                await reviewVizPullRequest({
+                  ...github,
+                  repositoryId: event.repository.id,
+                  pullNumber: event.number,
+                  headSha: event.pull_request.head.sha,
+                  username: trigger.login,
+                  analyze: options.analyze ?? analyzeBehavior,
+                  model,
+                  getModelKey: () => model.startsWith("openai/")
+                    ? config.AI_GATEWAY_API_KEY || getVercelOidcToken()
+                    : config.OPENAI_API_KEY ?? "",
+                });
+              }),
+            ).finally(() => {
+              if (--scheduled.count === 0) activeReviews.delete(event.number);
+            });
+            scheduled.tail = work;
+            if (options.waitUntil) {
+              options.waitUntil(work.catch(() => {
+                console.error(JSON.stringify({ event: "behavior_review_failed", deliveryId: id }));
+              }));
+            } else {
+              await work;
+            }
+            return;
+          }
           if (!["opened", "reopened", "synchronize"].includes(event.action))
             return;
-          const signal = AbortSignal.timeout(8000);
-          const request = {
-            fetch: ((input, init) =>
-              fetchImpl(input, { ...init, signal })) satisfies typeof fetch,
-          };
-          const authOptions = {
-            appId: config.APP_ID,
-            privateKey: config.PRIVATE_KEY,
-          };
-          const appOctokit = new Octokit({
-            authStrategy: createAppAuth,
-            auth: authOptions,
-            request,
-            log: quietLog,
-          });
-          const auth = createAppAuth({
-            ...authOptions,
-            request: appOctokit.request,
-            log: quietLog,
-          });
-          // Mint explicitly: auth-app's request hook does not inherit repositoryIds/permissions.
-          const { token } = await auth({
-            type: "installation",
-            installationId: event.installation.id,
-            repositoryIds: [event.repository.id],
-            permissions: { contents: "read", pull_requests: "write" },
-          });
-          const octokit = new Octokit({ auth: token, request, log: quietLog });
-          const { data: app } = await appOctokit.rest.apps.getAuthenticated();
-          if (!app?.slug) throw new Error("Could not identify GitHub App");
-          const [owner, repo] = event.repository.full_name.split("/");
-          if (!owner || !repo)
-            throw new WebhookError(400, "Invalid repository");
-          await updatePullRequestDiagrams({
-            octokit,
-            owner,
-            repo,
-            repositoryId: event.repository.id,
-            pullNumber: event.number,
-            headSha: event.pull_request.head.sha,
-            botLogin: `${app.slug}[bot]`,
-            signal,
+          await runPullRequest(event, AbortSignal.timeout(8000), async (github) => {
+            const [owner, repo] = event.repository.full_name.split("/");
+            if (!owner || !repo)
+              throw new WebhookError(400, "Invalid repository");
+            await updatePullRequestDiagrams({
+              ...github,
+              owner,
+              repo,
+              repositoryId: event.repository.id,
+              pullNumber: event.number,
+              headSha: event.pull_request.head.sha,
+            });
           });
           return;
         }
